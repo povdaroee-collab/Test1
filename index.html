@@ -297,29 +297,61 @@
                 console.log("Using Firestore Leave Path:", leaveRequestsCollectionPath);
                 console.log("Using Firestore Out Path:", outRequestsCollectionPath);
 
-                // --- Firebase Authentication ---
+               // --- Firebase Authentication ---
                 onAuthStateChanged(auth, (user) => {
                     if (user) {
                         console.log("Firebase Auth state changed. User UID:", user.uid);
                         userId = user.uid; // Firebase Auth UID
 
-                        const rememberedUser = localStorage.getItem('leaveAppUser');
-                        if (rememberedUser) {
-                            try {
-                                const parsedUser = JSON.parse(rememberedUser);
-                                if (parsedUser && parsedUser.id) { 
-                                    console.log("Found remembered user:", parsedUser.id);
-                                    currentUser = parsedUser; 
-                                    showLoggedInState(parsedUser);
-                                    fetchUsers(); // Fetch in background
-                                    return; 
-                                }
-                            } catch (e) {
-                                localStorage.removeItem('leaveAppUser'); 
-                            }
+                        // --- <<< ថ្មី: Check browser and load models FIRST ---
+                        function isClient() {
+                            const ua = navigator.userAgent || navigator.vendor || window.opera;
+                            return (
+                                (ua.indexOf('FBAN') > -1) || (ua.indexOf('FBAV') > -1) ||
+                                (ua.indexOf('Twitter') > -1) || (ua.indexOf('Telegram') > -1) ||
+                                (ua.indexOf('WebView') > -1) || (ua.indexOf('wv') > -1)
+                            );
                         }
-                        console.log("No remembered user found, starting normal app flow.");
-                        initializeAppFlow();
+
+                        if (isClient()) {
+                            console.log("Detected In-App Browser.");
+                            if (inAppWarning) inAppWarning.classList.remove('hidden');
+                            if (modelStatusEl) modelStatusEl.textContent = 'សូមបើកក្នុង Browser ពេញលេញ';
+                            if (dataLoadingIndicator) dataLoadingIndicator.classList.add('hidden');
+                            // Do not proceed to load models or data
+                        } else {
+                            console.log("Detected Full Browser.");
+                            if (inAppWarning) inAppWarning.classList.add('hidden');
+                            
+                            // Load models immediately
+                            if (typeof faceapi !== 'undefined') {
+                                if (scanFaceBtn) scanFaceBtn.disabled = true; 
+                                loadFaceApiModels(); // <<< ថ្មី: Call this immediately
+                            } else {
+                                console.error("Face-API.js មិនអាចទាញយកបានត្រឹមត្រូវទេ។");
+                                if (modelStatusEl) modelStatusEl.textContent = 'Error: មិនអាចទាញយក Library ស្កេនមុខបាន';
+                            }
+                            // --- End of new logic ---
+
+                            const rememberedUser = localStorage.getItem('leaveAppUser');
+                            if (rememberedUser) {
+                                try {
+                                    const parsedUser = JSON.parse(rememberedUser);
+                                    if (parsedUser && parsedUser.id) { 
+                                        console.log("Found remembered user:", parsedUser.id);
+                                        currentUser = parsedUser; 
+                                        showLoggedInState(parsedUser); // This will now work, models are loading
+                                        fetchUsers(); // Fetch in background
+                                        return; 
+                                    }
+                                } catch (e) {
+                                    localStorage.removeItem('leaveAppUser'); 
+                                }
+                            }
+                            console.log("No remembered user found, starting normal app flow.");
+                            initializeAppFlow(); // This will now only fetch users
+                        }
+
                     } else {
                         console.log("Firebase Auth: No user signed in. Attempting anonymous sign-in...");
                         signInAnonymously(auth).catch(anonError => {
@@ -356,36 +388,14 @@
 
             // --- Main App Logic (to be called after auth is confirmed) ---
             function initializeAppFlow() {
-                console.log("initializeAppFlow called.");
-                function isClient() {
-                    const ua = navigator.userAgent || navigator.vendor || window.opera;
-                    return (
-                        (ua.indexOf('FBAN') > -1) || (ua.indexOf('FBAV') > -1) ||
-                        (ua.indexOf('Twitter') > -1) || (ua.indexOf('Telegram') > -1) ||
-                        (ua.indexOf('WebView') > -1) || (ua.indexOf('wv') > -1)
-                    );
-                }
-
-                if (isClient()) {
-                    console.log("Detected In-App Browser.");
-                    if (inAppWarning) inAppWarning.classList.remove('hidden');
-                    if (modelStatusEl) modelStatusEl.textContent = 'សូមបើកក្នុង Browser ពេញលេញ';
-                    if (dataLoadingIndicator) dataLoadingIndicator.classList.add('hidden');
-                } else {
-                    console.log("Detected Full Browser.");
-                    if (inAppWarning) inAppWarning.classList.add('hidden');
-                    if (dataLoadingIndicator) dataLoadingIndicator.classList.remove('hidden');
-                    
-                    fetchUsers();
-                    
-                    if (typeof faceapi !== 'undefined') {
-                        if (scanFaceBtn) scanFaceBtn.disabled = true; 
-                        loadFaceApiModels();
-                    } else {
-                        console.error("Face-API.js មិនអាចទាញយកបានត្រឹមត្រូវទេ។");
-                        if (modelStatusEl) modelStatusEl.textContent = 'Error: មិនអាចទាញយក Library ស្កេនមុខបាន';
-                    }
-                }
+                console.log("initializeAppFlow called (for non-remembered user).");
+                
+                // <<< កែប្រែ: Removed isClient() and loadFaceApiModels() from here
+                // They are now in onAuthStateChanged
+                
+                console.log("Fetching users for initial login...");
+                if (dataLoadingIndicator) dataLoadingIndicator.classList.remove('hidden');
+                fetchUsers();
             }
             
             // --- Google Sheet Data Fetching ---
