@@ -26,13 +26,14 @@
             doc, 
             setDoc, 
             updateDoc,
-            deleteDoc, // <<< FIXED: Added deleteDoc import
+            deleteDoc,
+            getDoc, // <<< ថ្មី: Added getDoc import
             collection, 
             query, 
             where, 
             onSnapshot, 
             serverTimestamp,
-            Timestamp, // Import Timestamp for date queries
+            Timestamp,
             setLogLevel 
         } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
 
@@ -59,6 +60,8 @@
         let currentUser = null; 
         let selectedUserId = null; 
         let faceScanInterval = null; 
+        let userReferenceDescriptor = null; // <<< ថ្មី: Cache user's face descriptor
+        let currentReturnRequestId = null; // <<< ថ្មី: Store ID for return confirmation
 
         // --- Google Sheet Config ---
         const SHEET_ID = '1_Kgl8UQXRsVATt_BOHYQjVWYKkRIBA12R-qnsBoSUzc';
@@ -72,6 +75,16 @@
         // --- Firestore Collection Path ---
         let leaveRequestsCollectionPath; 
         let outRequestsCollectionPath;
+
+        // --- Location Config --- // <<< ថ្មី
+        const allowedAreaCoords = [
+            [11.417052769150015, 104.76508285291308],
+            [11.417130005964497, 104.76457396198742],
+            [11.413876386899489, 104.76320488118378],
+            [11.41373800267192, 104.76361527709159]
+        ];
+
+        const LOCATION_FAILURE_MESSAGE = "ការបញ្ជាក់ចូលមកវិញ បរាជ័យ។ \n\nប្រហែលទូរស័ព្ទអ្នកមានបញ្ហា ការកំណត់បើ Live Location ដូច្នោះអ្នកមានជម្រើសមួយទៀតគឺអ្នកអាចទៅបញ្ជាក់ដោយផ្ទាល់នៅការិយាល័យអគារ B ជាមួយក្រុមការងារលោកគ្រូ ដារ៉ូ។";
 
         // --- Element References (Will be assigned in DOMContentLoaded) ---
         let userSearchInput, userDropdown, userSearchError, scanFaceBtn, modelStatusEl, 
@@ -101,7 +114,9 @@
             openOutRequestBtn, requestOutPage, cancelOutRequestBtn, submitOutRequestBtn,
             outRequestErrorEl, outRequestLoadingEl,
             outDurationSearchInput, outDurationDropdownEl, outReasonSearchInput, outReasonDropdownEl,
-            outDateInput;
+            outDateInput,
+            // Return Scan Modal Elements // <<< ថ្មី
+            returnScanModal, returnVideo, returnScanStatusEl, returnScanDebugEl, cancelReturnScanBtn;
 
         // --- Duration/Reason Constants ---
         const leaveDurations = [
@@ -143,7 +158,8 @@
             // Assumes inputDate is yyyy-mm-dd
             if (!inputDate || inputDate.split('-').length !== 3) return getTodayString('dd/mm/yyyy');
             const parts = inputDate.split('-');
-            return `${parts[2]}/${parts[1]}/${parts[0]}`; // dd/mm/yyyy
+            return `${parts[2]}/${parts[1]
+                }/${parts[0]}`; // dd/mm/yyyy
         }
 
         function addDays(startDateStr, days) {
@@ -261,6 +277,13 @@
             cancelDeleteBtn = document.getElementById('cancel-delete-btn');
             deleteRequestId = document.getElementById('delete-request-id');
             deleteCollectionType = document.getElementById('delete-collection-type');
+
+            // Return Scan Modal // <<< ថ្មី
+            returnScanModal = document.getElementById('return-scan-modal');
+            returnVideo = document.getElementById('return-video');
+            returnScanStatusEl = document.getElementById('return-scan-status');
+            returnScanDebugEl = document.getElementById('return-scan-debug');
+            cancelReturnScanBtn = document.getElementById('cancel-return-scan-btn');
 
             // --- Firebase Initialization ---
             try {
@@ -506,6 +529,43 @@
                 }
             }
 
+            // <<< ថ្មី: Function to get reference descriptor (cached)
+            async function getReferenceDescriptor(userPhotoUrl) {
+                if (userReferenceDescriptor) {
+                    console.log("Using cached reference descriptor.");
+                    return userReferenceDescriptor;
+                }
+
+                if (!userPhotoUrl) throw new Error("Missing user photo URL");
+
+                console.log("Fetching and computing new reference descriptor...");
+                let referenceImage;
+                try {
+                    const img = new Image();
+                    img.crossOrigin = 'anonymous'; 
+                    img.src = userPhotoUrl;
+                    await new Promise((resolve, reject) => {
+                        img.onload = () => resolve();
+                        img.onerror = (err) => reject(new Error('Failed to fetch (មិនអាចទាញយករូបថតយោងបាន)។ សូមប្រាកដថា Link រូបថតត្រឹមត្រូវ។')); 
+                    });
+                    referenceImage = img;
+                } catch (fetchError) {
+                    throw fetchError; 
+                }
+                
+                let referenceDetection;
+                try {
+                    referenceDetection = await faceapi.detectSingleFace(referenceImage).withFaceLandmarks(true).withFaceDescriptor();
+                    if (!referenceDetection) throw new Error('រកមិនឃើញមុខនៅក្នុងរូបថតយោង');
+                } catch (descriptorError) {
+                    throw new Error('មិនអាចវិភាគមុខពីរូបថតយោងបានទេ (រូបថតអាចមិនច្បាស់)។');
+                }
+
+                userReferenceDescriptor = referenceDetection.descriptor; // Cache it
+                return userReferenceDescriptor;
+            }
+
+
             async function startFaceScan() {
                 console.log("startFaceScan called.");
                 if (!selectedUserId) {
@@ -523,41 +583,17 @@
                 if (scanStatusEl) scanStatusEl.textContent = 'កំពុងព្យាយាមបើកកាមេរ៉ា...';
 
                 try {
-                    // 1. Fetch and process reference image
-                    console.log("Fetching reference image from:", user.photo);
-                    if (scanStatusEl) scanStatusEl.textContent = 'កំពុងទាញយករូបថតយោង...';
-                    let referenceImage;
-                    try {
-                        const img = new Image();
-                        img.crossOrigin = 'anonymous'; 
-                        img.src = user.photo;
-                        await new Promise((resolve, reject) => {
-                            img.onload = () => resolve();
-                            img.onerror = (err) => reject(new Error('Failed to fetch (មិនអាចទាញយករូបថតយោងបាន)។ សូមប្រាកដថា Link រូបថតត្រឹមត្រូវ។')); 
-                        });
-                        referenceImage = img;
-                    } catch (fetchError) {
-                        throw fetchError; 
-                    }
-                    
-                    // 2. Compute reference descriptor
+                    // 1. Compute reference descriptor
                     if (scanStatusEl) scanStatusEl.textContent = 'កំពុងវិភាគរូបថតយោង...';
-                     let referenceDescriptor;
-                     try {
-                        const referenceDetection = await faceapi.detectSingleFace(referenceImage).withFaceLandmarks(true).withFaceDescriptor();
-                        if (!referenceDetection) throw new Error('រកមិនឃើញមុខនៅក្នុងរូបថតយោង');
-                        referenceDescriptor = referenceDetection.descriptor;
-                    } catch (descriptorError) {
-                         throw new Error('មិនអាចវិភាគមុខពីរូបថតយោងបានទេ (រូបថតអាចមិនច្បាស់)។');
-                     }
+                    const referenceDescriptor = await getReferenceDescriptor(user.photo);
 
-                    // 3. Start video stream
+                    // 2. Start video stream
                     if (scanStatusEl) scanStatusEl.textContent = 'កំពុងស្នើសុំបើកកាមេរ៉ា...';
                     const stream = await navigator.mediaDevices.getUserMedia({ video: {} });
                     if (video) video.srcObject = stream;
                     if (scanStatusEl) scanStatusEl.textContent = 'សូមដាក់មុខរបស់អ្នកឲ្យចំកាមេរ៉ា';
 
-                    // 4. Start detection interval
+                    // 3. Start detection interval
                     if (faceScanInterval) clearInterval(faceScanInterval); 
                     faceScanInterval = setInterval(async () => {
                         if (!video || video.readyState < 3) return; 
@@ -616,7 +652,7 @@
 
             // --- App Navigation & State Logic ---
             function loginUser(userIdToLogin) {
-                const user = allUsersData.find(u => u.id === userIdToLogin);
+                 const user = allUsersData.find(u => u.id === userIdToLogin);
                  if (!user) {
                      alert("មានបញ្ហា Login: រកមិនឃើញទិន្នន័យអ្នកប្រើប្រាស់");
                      return;
@@ -631,6 +667,7 @@
             
             function logout() {
                 currentUser = null;
+                userReferenceDescriptor = null; // <<< ថ្មី: Clear cached descriptor
                 localStorage.removeItem('leaveAppUser'); 
                 if (loginPage) loginPage.classList.remove('hidden');
                 if (mainAppContainer) mainAppContainer.classList.add('hidden');
@@ -654,6 +691,7 @@
             
             function showLoggedInState(user) {
                 currentUser = user;
+                userReferenceDescriptor = null; // <<< ថ្មី: Clear cache for new user
                 populateAccountPage(user);
                 if (homeUserName) homeUserName.textContent = user.name || '...';
                 if (loginPage) loginPage.classList.add('hidden');
@@ -663,6 +701,10 @@
                 
                 // Start listening to history for this user
                 setupHistoryListeners(user.id);
+                // <<< ថ្មី: Pre-calculate descriptor for return scan
+                if (user.photo) {
+                    getReferenceDescriptor(user.photo).catch(err => console.error("Failed to pre-cache descriptor:", err));
+                }
             }
             
             function populateAccountPage(user) {
@@ -743,8 +785,8 @@
                 } else { // 'out' tab
                     if (historyTabLeave) historyTabLeave.classList.remove('border-blue-600', 'text-blue-600');
                     if (historyTabLeave) historyTabLeave.classList.add('border-transparent', 'text-gray-500');
-                    if (historyTabOut) historyTabOut.classList.remove('border-blue-600', 'text-blue-600');
-                    if (historyTabOut) historyTabOut.classList.add('border-transparent', 'text-gray-500');
+                    if (historyTabOut) historyTabOut.classList.add('border-blue-600', 'text-blue-600');
+                    if (historyTabOut) historyTabOut.classList.remove('border-transparent', 'text-gray-500');
                     
                     if (historyContainerLeave) historyContainerLeave.classList.add('hidden');
                     if (historyContainerOut) historyContainerOut.classList.remove('hidden');
@@ -986,6 +1028,7 @@
                         requestedAt: serverTimestamp(), 
                         requestId: requestId,
                         firestoreUserId: auth.currentUser ? auth.currentUser.uid : 'unknown_auth_user'
+                        // <<< ថ្មី: returnStatus and returnedAt will be added later
                     };
                     
                     if (!db || !outRequestsCollectionPath) throw new Error("Firestore DB or Out Collection Path is not initialized.");
@@ -1028,24 +1071,24 @@
             async function sendTelegramNotification(message) {
                  console.log("Sending Telegram notification...");
                  try {
-                    const telegramUrl = `https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`;
-                    const telegramResponse = await fetch(telegramUrl, {
-                        method: 'POST',
-                        headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({
-                            chat_id: CHAT_ID,
-                            text: message,
-                            parse_mode: 'HTML'
-                        })
-                    });
-                     if (!telegramResponse.ok) {
-                         const errorBody = await telegramResponse.text();
-                         console.error("Telegram API error:", telegramResponse.status, errorBody);
+                     const telegramUrl = `https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`;
+                     const telegramResponse = await fetch(telegramUrl, {
+                         method: 'POST',
+                         headers: { 'Content-Type': 'application/json' },
+                         body: JSON.stringify({
+                             chat_id: CHAT_ID,
+                             text: message,
+                             parse_mode: 'HTML'
+                         })
+                     });
+                      if (!telegramResponse.ok) {
+                          const errorBody = await telegramResponse.text();
+                          console.error("Telegram API error:", telegramResponse.status, errorBody);
                      } else {
                          console.log("Telegram notification sent successfully.");
                      }
                  } catch (e) {
-                     console.error("Failed to send Telegram message:", e);
+                      console.error("Failed to send Telegram message:", e);
                  }
             }
 
@@ -1162,6 +1205,7 @@
                 }
             }
 
+            // <<< កែប្រែ: Function renderHistoryCard
             function renderHistoryCard(request, type) {
                  if (!request || !request.requestId) return '';
                 
@@ -1179,7 +1223,7 @@
                         statusText = 'បានបដិសេធ';
                          if (request.decisionAt) {
                             decisionTime = `<p class="text-xs text-red-600 mt-1">នៅម៉ោង: ${request.decisionAt}</p>`;
-                        }
+                         }
                         break;
                     case 'editing':
                         statusColor = 'bg-blue-100 text-blue-800';
@@ -1197,6 +1241,22 @@
                 // Show Edit/Delete buttons only if request is pending or editing
                 const showActions = (request.status === 'pending' || request.status === 'editing');
 
+                // <<< ថ្មី: Logic for Return Button
+                let returnInfo = '';
+                let returnButton = '';
+                if (type === 'out') {
+                    if (request.returnStatus === 'បានចូលមកវិញ') {
+                        returnInfo = `<p class="text-sm font-semibold text-green-700 mt-2">✔️ បានចូលមកវិញ: ${request.returnedAt || ''}</p>`;
+                    } else if (request.status === 'approved') {
+                        // Show button only if approved and not yet returned
+                        returnButton = `
+                            <button class_name_param="return-btn" data-id="${request.requestId}" class="w-full mt-3 py-2 px-3 bg-green-600 text-white rounded-lg font-semibold text-sm shadow-sm hover:bg-green-700">
+                                បញ្ជាក់ចូលមកវិញ
+                            </button>
+                        `;
+                    }
+                }
+
                 return `
                     <div class="bg-white border border-gray-200 rounded-lg shadow-sm p-4 mb-4">
                         <div class="flex justify-between items-start">
@@ -1208,27 +1268,30 @@
                         <p class="text-sm text-gray-600 mt-1">${dateString}</p>
                         <p class="text-sm text-gray-500 mt-1"><b>មូលហេតុ:</b> ${request.reason || 'មិនបានបញ្ជាក់'}</p>
                         ${decisionTime}
-                        <div class="flex justify-between items-center mt-3 pt-3 border-t border-gray-100">
-                             <p class="text-xs text-gray-400">ID: ${request.requestId}</p>
-                             ${showActions ? `
-                                <div class="flex space-x-2">
-                                    <button class_name_param="edit-btn" data-id="${request.requestId}" data-type="${type}" class="p-1 text-blue-600 hover:text-blue-800">
-                                        <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" /></svg>
-                                    </button>
-                                    <button class_name_param="delete-btn" data-id="${request.requestId}" data-type="${type}" class="p-1 text-red-600 hover:text-red-800">
-                                        <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" /></svg>
-                                    </button>
-                                </div>
-                             ` : ''}
-                        </div>
+                        ${returnInfo} <div class="mt-3 pt-3 border-t border-gray-100">
+                             <div class="flex justify-between items-center">
+                                <p class="text-xs text-gray-400">ID: ${request.requestId}</p>
+                                ${showActions ? `
+                                    <div class="flex space-x-2">
+                                        <button class_name_param="edit-btn" data-id="${request.requestId}" data-type="${type}" class="p-1 text-blue-600 hover:text-blue-800">
+                                            <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" /></svg>
+                                        </button>
+                                        <button class_name_param="delete-btn" data-id="${request.requestId}" data-type="${type}" class="p-1 text-red-600 hover:text-red-800">
+                                            <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" /></svg>
+                                        </button>
+                                    </div>
+                                ` : ''}
+                             </div>
+                             ${returnButton} </div>
                     </div>
                 `;
             }
 
-            // --- Edit/Delete Event Delegation ---
+            // --- Edit/Delete/Return Event Delegation --- // <<< កែប្រែ
             document.body.addEventListener('click', async (e) => {
                 const editBtn = e.target.closest('.edit-btn');
                 const deleteBtn = e.target.closest('.delete-btn');
+                const returnBtn = e.target.closest('.return-btn'); // <<< ថ្មី
 
                 if (editBtn) {
                     console.log("Edit button clicked for:", editBtn.dataset.id, "Type:", editBtn.dataset.type);
@@ -1238,6 +1301,11 @@
                 if (deleteBtn) {
                     console.log("Delete button clicked for:", deleteBtn.dataset.id, "Type:", deleteBtn.dataset.type);
                     openDeleteModal(deleteBtn.dataset.id, deleteBtn.dataset.type);
+                }
+
+                if (returnBtn) { // <<< ថ្មី
+                    console.log("Return button clicked for:", returnBtn.dataset.id);
+                    await startReturnConfirmation(returnBtn.dataset.id);
                 }
             });
 
@@ -1258,18 +1326,6 @@
                     await updateDoc(requestRef, { status: 'editing' });
                     console.log("Request status set to 'editing'");
                     
-                    // --- (Simplified Edit Modal) ---
-                    // For this version, we will only allow editing 'reason'
-                    // A full edit modal would require rebuilding all the dropdown logic
-                    // This is a placeholder for a simpler "Reason" edit for now
-                    
-                    // For now, we just fill the basic data
-                    // NOTE: This example only populates the LEAVE form elements
-                    // A robust solution would check 'type' and populate correct form
-                    
-                    // We will just use the "Leave" modal elements for both for simplicity
-                    // This assumes both 'leave' and 'out' requests have these fields
-                    
                     // Get the document data
                     const docSnap = await getDoc(requestRef); // Need getDoc
                     if (!docSnap.exists()) throw new Error("Document not found");
@@ -1278,21 +1334,13 @@
                     if (editModalTitle) editModalTitle.textContent = (type === 'leave') ? "កែសម្រួលច្បាប់ឈប់" : "កែសម្រួលច្បាប់ចេញក្រៅ";
                     if (editRequestId) editRequestId.value = requestId; // Store ID
                     
-                    // --- Populate Edit Form (Simplified) ---
-                    // This part is complex; for now, we'll just populate the reason
+                    // Populate existing values
                     if (editReasonSearch) editReasonSearch.value = data.reason || '';
-                    
-                    // NOTE: Setting up duration and dates is complex as it requires
-                    // re-initializing the dropdowns and date pickers.
-                    // For this iteration, we focus on the 'editing' status lock.
-                    // We will assume only 'reason' is editable for now.
+                    if (editDurationSearch) editDurationSearch.value = data.duration;
                     
                     // Re-setup dropdowns for the modal
                     setupSearchableDropdown('edit-duration-search', 'edit-duration-dropdown', (type === 'leave' ? leaveDurationItems : outDurationItems), (duration) => {}, false);
                     setupSearchableDropdown('edit-reason-search', 'edit-reason-dropdown', (type === 'leave' ? leaveReasonItems : outReasonItems), (reason) => {}, true);
-                    
-                    // Populate existing values
-                    if (editDurationSearch) editDurationSearch.value = data.duration;
                     
                     // Handle date fields
                     if (type === 'leave') {
@@ -1311,7 +1359,6 @@
                          if (editDateRangeContainer) editDateRangeContainer.classList.add('hidden');
                          if (editLeaveDateSingle) editLeaveDateSingle.value = data.startDate; // dd/mm/yyyy
                     }
-                    
                     
                     if (editLoadingEl) editLoadingEl.classList.add('hidden');
                     
@@ -1345,12 +1392,12 @@
             });
             
             // --- Submit Edit Button ---
-            // This is a simplified submit, only updating reason
             if (submitEditBtn) submitEditBtn.addEventListener('click', async () => {
                 const requestId = editRequestId.value;
                 const type = (editModalTitle.textContent.includes("ឈប់")) ? 'leave' : 'out';
                 const collectionPath = (type === 'leave') ? leaveRequestsCollectionPath : outRequestsCollectionPath;
                 
+                // --- This simple version only updates reason ---
                 const newReason = editReasonSearch.value;
                 
                 if (!requestId || !collectionPath || !newReason || newReason.trim() === '') {
@@ -1375,10 +1422,6 @@
                     });
                     
                     console.log("Edit submitted, status set to 'pending'");
-                    
-                    // Re-send Telegram notification
-                    // (We need to get the full data again, or pass it around)
-                    // For simplicity, we'll send a basic update message
                     
                     let message = `<b>🔔 សំណើត្រូវបានកែសម្រួល 🔔</b>\n\n`;
                     message += `<b>ID:</b> \`${requestId}\`\n`;
@@ -1444,8 +1487,8 @@
                 }
             });
 
-        }); // End of DOMContentLoaded
-      // --- (((( ថ្មី: RETURN CONFIRMATION LOGIC )))) ---
+
+            // --- (((( ថ្មី: RETURN CONFIRMATION LOGIC )))) ---
 
             // Point in Polygon Helper
             function isPointInPolygon(point, polygon) {
@@ -1628,6 +1671,10 @@
             }
 
             // --- (((( END OF ថ្មី: RETURN CONFIRMATION LOGIC )))) ---
+
+
+        }); // End of DOMContentLoaded
+    </script>
 
 
         }); // End of DOMContentLoaded
