@@ -553,11 +553,15 @@
                     throw fetchError; 
                 }
                 
-                let referenceDetection;
+               let referenceDetection;
                 try {
-                    referenceDetection = await faceapi.detectSingleFace(referenceImage).withFaceLandmarks(true).withFaceDescriptor();
+                    // <<< នេះជាការកែប្រែ
+                    const options = new faceapi.TinyFaceDetectorOptions(); 
+                    referenceDetection = await faceapi.detectSingleFace(referenceImage, options).withFaceLandmarks(true).withFaceDescriptor();
+                    
                     if (!referenceDetection) throw new Error('រកមិនឃើញមុខនៅក្នុងរូបថតយោង');
                 } catch (descriptorError) {
+                    console.error("Descriptor Error:", descriptorError); // បន្ថែម Console Log
                     throw new Error('មិនអាចវិភាគមុខពីរូបថតយោងបានទេ (រូបថតអាចមិនច្បាស់)។');
                 }
 
